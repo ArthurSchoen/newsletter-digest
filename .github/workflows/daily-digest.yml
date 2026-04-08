@@ -2,9 +2,11 @@ name: Daily Newsletter Digest
 
 on:
   schedule:
-    # Every day at 9:00 AM Boston (EST=14:00 UTC, EDT=13:00 UTC)
-    # Using 13:00 UTC for EDT (March–November). Adjust to 14:00 for EST.
-    - cron: '0 13 * * *'
+    # Target: ~9 AM Boston (EDT). GitHub Actions cron is delayed 2-3h,
+    # so we schedule at 10:30 UTC to compensate.
+    # 10:30 UTC + ~2.5h delay ≈ 13:00 UTC = 9:00 AM EDT
+    # Adjust to 11:30 UTC for EST (November–March).
+    - cron: '30 10 * * *'
   workflow_dispatch: # Allow manual trigger from GitHub UI
 
 jobs:
