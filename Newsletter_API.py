@@ -382,7 +382,7 @@ RULES:
 - Ignore ads, partnerships, promotional content in newsletters.
 - Section weight follows today's actual news importance.
 - Opinions fine when evidence-based.
-- Do NOT repeat any fact across sections. Each section is unique.
+- ZERO REPETITION: A fact/topic used in "5 Things to Know" MUST NOT reappear in "AI & Tech", "Big Story", or any other section. Each section covers DIFFERENT stories. Treat each section as drawing from a shrinking pool of stories.
 - Return VALID HTML ONLY. No markdown. No code fences.
 
 MARKET NUMBERS FOR CONTEXT (reference only — the market table is built separately):
@@ -401,23 +401,6 @@ OUTPUT — every field must be filled. Never write "N/A", "no data", or leave a 
   <li><strong>Bold headline.</strong> Supporting sentence with a number.</li>
   <li><strong>Bold headline.</strong> Supporting sentence.</li>
 </ul>
-
-<!-- KEY TAKEAWAYS: 3 cards, one per theme. Tag + one punchy sentence. Nothing more. -->
-<h2>Key Takeaways</h2>
-<div class="takeaways-row">
-  <div class="takeaway-card takeaway-macro">
-    <span class="tag">Macro</span>
-    <p>One strong sentence. Max 12 words.</p>
-  </div>
-  <div class="takeaway-card takeaway-ai">
-    <span class="tag">AI</span>
-    <p>One strong sentence. Max 12 words.</p>
-  </div>
-  <div class="takeaway-card takeaway-market">
-    <span class="tag">Market</span>
-    <p>One strong sentence. Max 12 words.</p>
-  </div>
-</div>
 
 <!-- NUMBER OF THE DAY: the single most striking number from today's news. -->
 <h2>Number of the Day</h2>
@@ -442,7 +425,7 @@ OUTPUT — every field must be filled. Never write "N/A", "no data", or leave a 
   <p>One paragraph, 2-3 sentences. Written for a general reader. Explain the real-world impact beyond markets.</p>
 </div>
 
-<!-- AI & TECH: 4–5 mini cards. Company/topic + key metric + one-line implication. No repetition with 5 Things. -->
+<!-- AI & TECH: 4–5 mini cards. Company/topic + key metric + one-line implication. MUST use DIFFERENT stories than 5 Things — no topic overlap allowed. -->
 <h2>AI &amp; Tech</h2>
 <div class="ai-grid">
   <div class="ai-card">
@@ -518,7 +501,7 @@ OUTPUT — every field must be filled. Never write "N/A", "no data", or leave a 
 </div>
 
 STRICT RULES:
-- Do NOT repeat any fact across sections. Each section must contain unique information.
+- ABSOLUTE RULE: Do NOT repeat any topic, company, or fact across sections. If a topic appears in 5 Things, it CANNOT appear in AI & Tech or Big Story. Each section draws from DIFFERENT stories.
 - The market table is NOT in your output — it is injected separately. Do NOT output a market table.
 - All <a href> must be real absolute URLs starting with https://. Never use "#".
 - For Video: use href="https://www.youtube.com/results?search_query=VIDEO+TITLE+KEYWORDS"
@@ -690,19 +673,31 @@ def generate_digest_html(newsletters: dict) -> tuple:
     prompt = build_prompt(newsletters, market_data)
 
     print("✍️  Pass 1: generating digest...")
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.3,
-            max_output_tokens=8000,
-            system_instruction=(
-                "You are a top-tier international editor producing a refined daily briefing. "
-                "Return only valid HTML using the exact CSS classes specified. No markdown fences."
-            ),
-        ),
-    )
-    html = response.text.strip()
+    html = None
+    for attempt in range(1, 4):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.3,
+                    max_output_tokens=16000,
+                    system_instruction=(
+                        "You are a top-tier international editor producing a refined daily briefing. "
+                        "Return only valid HTML using the exact CSS classes specified. No markdown fences."
+                    ),
+                ),
+            )
+            html = response.text.strip()
+            break
+        except Exception as e:
+            print(f"   ⚠️  Attempt {attempt}/3 failed: {e}")
+            if attempt < 3:
+                wait = 30 * attempt
+                print(f"   ⏳ Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                raise
     if html.startswith("```"):
         html = html.split("\n", 1)[-1].rsplit("```", 1)[0]
     html = html.strip()
@@ -729,7 +724,12 @@ def wrap_in_email_template(content_html: str, source_count: int = 3) -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light only">
+  <meta name="supported-color-schemes" content="light only">
   <style>
+    /* Force light mode in email clients */
+    :root {{ color-scheme: light only; supported-color-schemes: light only; }}
+    [data-ogsc] body, [data-ogsb] body {{ background: #e8edf3 !important; color: #1a202c !important; }}
     /* ── Reset ── */
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
@@ -848,40 +848,6 @@ def wrap_in_email_template(content_html: str, source_count: int = 3) -> str:
       font-weight: 800;
       font-size: 18px;
       margin-right: 10px;
-    }}
-
-    /* ── Key Takeaways ── */
-    .takeaways-row {{
-      display: flex;
-      gap: 12px;
-      margin: 4px 0;
-    }}
-    .takeaway-card {{
-      flex: 1;
-      border-radius: 12px;
-      padding: 16px 16px 14px;
-      border-top: 3px solid transparent;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-    }}
-    .takeaway-macro  {{ background: #eff6ff; border-color: #2563eb; }}
-    .takeaway-ai     {{ background: #f5f3ff; border-color: #7c3aed; }}
-    .takeaway-market {{ background: #f0fdf4; border-color: #059669; }}
-    .takeaway-card .tag {{
-      font-size: 9px;
-      font-weight: 800;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      display: block;
-      margin-bottom: 6px;
-    }}
-    .takeaway-macro  .tag {{ color: #1d4ed8; }}
-    .takeaway-ai     .tag {{ color: #6d28d9; }}
-    .takeaway-market .tag {{ color: #047857; }}
-    .takeaway-card p {{
-      font-size: 13px;
-      line-height: 1.5;
-      color: #1f2937;
-      margin: 0;
     }}
 
     /* ── Number of the Day ── */
@@ -1230,7 +1196,6 @@ def wrap_in_email_template(content_html: str, source_count: int = 3) -> str:
     /* ── Mobile-first: stack flex layouts on narrow screens ── */
     @media (max-width: 600px) {{
       .content {{ padding: 20px 16px 16px; }}
-      .takeaways-row {{ flex-direction: column; }}
       .ai-grid {{ grid-template-columns: 1fr; }}
       .person-card {{ flex-direction: column; align-items: center; text-align: center; }}
       .person-quote {{ text-align: left; }}
