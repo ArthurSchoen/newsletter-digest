@@ -2,6 +2,12 @@
 
 Automated pipeline that reads your newsletter emails, summarizes them with Gemini, and sends you a premium HTML briefing every morning.
 
+## TL;DR
+
+- I was skimming 10+ newsletters a day, so I built a pipeline that reads them for me and sends one clean HTML briefing every morning.
+- Gmail IMAP fetch, structured Gemini summary, live market data, then a second Gemini pass that fact-checks the first one against hallucinated numbers.
+- Zero-cost infrastructure: the whole thing runs on a GitHub Actions cron, no server.
+
 ## How it works
 
 1. **Fetch** — Connects to Gmail via IMAP and pulls newsletters from the last 24h
