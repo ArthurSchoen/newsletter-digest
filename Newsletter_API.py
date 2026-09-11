@@ -206,61 +206,57 @@ def fetch_newsletters_from_gmail(
     mail = connect_to_gmail()
     mail.select("INBOX")
 
-    newsletters = {}
+    # One search, one download per message, matched against every source as it
+    # goes by. Searching per source instead would re-download the same inbox
+    # once for each of them: eight times the network for the same result.
+    # A message may legitimately match several sources, so all matches are kept.
+    status, data = mail.search(None, f'SINCE "{since_str}"')
+    msg_ids = data[0].split() if (status == "OK" and data and data[0]) else []
 
-    # KNOWN INEFFICIENCY: this searches and re-downloads the inbox once per
-    # source, so eight sources means eight full passes (~1600 fetches to find
-    # eight emails). One pass matching every source per message would be correct.
-    # Left as is because the job is a background cron with nobody waiting on it.
-    for source_name, keywords in sources.items():
-        found_texts = []
+    found = {name: [] for name in sources}
 
-        # Search broadly on date, then match the sender in Python: IMAP's own
-        # FROM search cannot express "any of these eight keywords" in one query.
-        status, data = mail.search(None, f'SINCE "{since_str}"')
-        if status != "OK" or not data[0]:
+    # Newest first, and capped at 200: the IMAP window is a whole day, so a busy
+    # inbox returns far more ids than the handful of newsletters we want.
+    for msg_id in reversed(msg_ids[-200:]):
+        status, msg_data = mail.fetch(msg_id, "(RFC822)")
+        if status != "OK":
             continue
 
-        msg_ids = data[0].split()
-        # Search newest first — avoid loading entire inbox if large
-        for msg_id in reversed(msg_ids[-200:]):
-            status, msg_data = mail.fetch(msg_id, "(RFC822)")
-            if status != "OK":
+        msg = email.message_from_bytes(msg_data[0][1])
+
+        from_header = decode_header(msg.get("From", ""))
+        matched = [n for n, kw in sources.items() if sender_matches(from_header, kw)]
+        if not matched:
+            continue
+
+        # Check timestamp
+        date_str = msg.get("Date", "")
+        try:
+            msg_date = email.utils.parsedate_to_datetime(date_str)
+            if msg_date.tzinfo is None:
+                msg_date = msg_date.replace(tzinfo=timezone.utc)
+            if msg_date < cutoff:
                 continue
+        except Exception:
+            # Malformed Date header: keep the email. A duplicate in the
+            # digest is a smaller cost than silently dropping a source.
+            pass
 
-            raw = msg_data[0][1]
-            msg = email.message_from_bytes(raw)
-
-            from_header = decode_header(msg.get("From", ""))
-            if not sender_matches(from_header, keywords):
-                continue
-
-            # Check timestamp
-            date_str = msg.get("Date", "")
-            try:
-                msg_date = email.utils.parsedate_to_datetime(date_str)
-                if msg_date.tzinfo is None:
-                    msg_date = msg_date.replace(tzinfo=timezone.utc)
-                if msg_date < cutoff:
-                    continue
-            except Exception:
-                # Malformed Date header: keep the email. A duplicate in the
-                # digest is a smaller cost than silently dropping a source.
-                pass
-
-            subject = decode_header(msg.get("Subject", "(no subject)"))
+        subject = decode_header(msg.get("Subject", "(no subject)"))
+        text = extract_text_from_message(msg)
+        for source_name in matched:
             print(f"   ✅ {source_name}: found «{subject}»")
-
-            text = extract_text_from_message(msg)
             if text.strip():
-                found_texts.append(f"[{subject}]\n{text}")
-
-        if found_texts:
-            newsletters[source_name] = "\n\n---\n\n".join(found_texts)
-        else:
-            print(f"   ⚠️  {source_name}: no email found in the last {lookback_hours}h")
+                found[source_name].append(f"[{subject}]\n{text}")
 
     mail.logout()
+
+    newsletters = {}
+    for source_name, texts in found.items():
+        if texts:
+            newsletters[source_name] = "\n\n---\n\n".join(texts)
+        else:
+            print(f"   ⚠️  {source_name}: no email found in the last {lookback_hours}h")
 
     # Fail loudly rather than send something. An empty result means the senders
     # drifted, the IMAP login failed, or it is a quiet day, and a briefing built
