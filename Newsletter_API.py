@@ -198,7 +198,8 @@ def fetch_newsletters_from_gmail(
     last `lookback_hours` hours, and return {source_name: combined_text}.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
-    # IMAP SINCE uses day granularity — search one extra day back, filter by time
+    # IMAP SINCE only has day granularity, so it cannot express "last 24 hours".
+    # Search one day wider than needed and drop what is too old in Python below.
     since_str = (cutoff - timedelta(days=1)).strftime("%d-%b-%Y")
 
     print(f"📬 Connecting to Gmail IMAP...")
@@ -207,10 +208,15 @@ def fetch_newsletters_from_gmail(
 
     newsletters = {}
 
+    # KNOWN INEFFICIENCY: this searches and re-downloads the inbox once per
+    # source, so eight sources means eight full passes (~1600 fetches to find
+    # eight emails). One pass matching every source per message would be correct.
+    # Left as is because the job is a background cron with nobody waiting on it.
     for source_name, keywords in sources.items():
         found_texts = []
 
-        # Build a broad SINCE search, then filter by sender keywords in Python
+        # Search broadly on date, then match the sender in Python: IMAP's own
+        # FROM search cannot express "any of these eight keywords" in one query.
         status, data = mail.search(None, f'SINCE "{since_str}"')
         if status != "OK" or not data[0]:
             continue
@@ -238,7 +244,9 @@ def fetch_newsletters_from_gmail(
                 if msg_date < cutoff:
                     continue
             except Exception:
-                pass  # If parsing fails, keep the email
+                # Malformed Date header: keep the email. A duplicate in the
+                # digest is a smaller cost than silently dropping a source.
+                pass
 
             subject = decode_header(msg.get("Subject", "(no subject)"))
             print(f"   ✅ {source_name}: found «{subject}»")
@@ -254,9 +262,14 @@ def fetch_newsletters_from_gmail(
 
     mail.logout()
 
+    # Fail loudly rather than send something. An empty result means the senders
+    # drifted, the IMAP login failed, or it is a quiet day, and a briefing built
+    # from nothing is worse than no briefing: it looks real and says nothing.
     if not newsletters:
-        print("⚠️  No newsletters fetched from Gmail. Using embedded samples as fallback.")
-        newsletters = _embedded_sample_newsletters()
+        raise RuntimeError(
+            f"No newsletters found in the last {lookback_hours}h. "
+            "Check the IMAP login and the sender keywords in NEWSLETTER_SOURCES."
+        )
 
     return newsletters
 
@@ -288,6 +301,8 @@ def get_market_data() -> list:
                 continue
             last = hist["Close"].iloc[-1]
             prev = hist["Close"].iloc[-2]
+            # The 10Y is a yield, not a price: it moves in basis points and a
+            # percentage change on it would be meaningless to a reader.
             is_tnx = "TNX" in symbol
 
             # Daily change
@@ -302,7 +317,8 @@ def get_market_data() -> list:
                 sign = "+" if chg_pct >= 0 else ""
                 change_str = f"{sign}{chg_pct:.2f}%"
 
-            # Weekly change (vs ~5 trading days ago)
+            # 5 rows back, not 7 days back: the history is trading days only,
+            # so 5 rows is one market week and skips weekends automatically.
             week_idx = min(5, len(hist) - 1)
             week_prev = hist["Close"].iloc[-1 - week_idx]
             week_pct = (last - week_prev) / week_prev * 100
@@ -546,6 +562,9 @@ def post_process_html(html: str, market_data: list) -> str:
     2. Inject the Python-built market table after the So What? callout.
     3. Re-encode all href URLs so query strings are properly formatted.
     """
+    # The prompt already forbids a market table, but a model that ignores one
+    # instruction in twenty would put invented prices in front of the reader.
+    # Deleting it here makes the guarantee structural instead of a request.
     # ── Remove any market table Gemini may have output ──
     html = re.sub(r'<table class="market-table".*?</table>', '', html, flags=re.DOTALL | re.IGNORECASE)
     # Remove any stray Market Dashboard heading Gemini might output
@@ -616,7 +635,10 @@ def verify_facts(html: str, newsletters_combined: str) -> str:
     newsletter sources, and bold any that are not supported. Returns the full HTML
     unchanged except for <span class="uncertain"> wrappers on suspicious values.
     """
-    # Extract just the numbers present in the digest for a lightweight check
+    # Checking numbers only, not prose. Numbers are what a reader acts on and
+    # what a model invents most confidently, and they are cheap to verify.
+    # The two truncations bound the cost of this second call; they also make
+    # the check incomplete, which is why a flagged number is marked and not cut.
     numbers_found = re.findall(r'[\$€£]?[\d,]+\.?\d*\s*(?:%|bn|tn|bps|k|M|B)?', html)
     numbers_str = ", ".join(sorted(set(numbers_found)))[:1500]
     sources_excerpt = newsletters_combined[:3000]
@@ -638,7 +660,9 @@ NEWSLETTER SOURCES:
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=verify_prompt,
-            config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=500),
+            # temperature 0 here, unlike the 0.3 of pass 1: this call is a lookup,
+        # and any creativity in a fact-checker is a false positive.
+        config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=500),
         )
         raw = response.text.strip()
         # Parse the list of suspicious numbers
@@ -691,6 +715,9 @@ def generate_digest_html(newsletters: dict) -> tuple:
             html = response.text.strip()
             break
         except Exception as e:
+            # Added after a 503 from the API killed a morning run. The waits are
+            # long (30s, 60s) because the failure to survive is a busy upstream,
+            # not a rate limit, and nothing is waiting on this job.
             print(f"   ⚠️  Attempt {attempt}/3 failed: {e}")
             if attempt < 3:
                 wait = 30 * attempt
